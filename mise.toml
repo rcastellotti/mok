@@ -1,0 +1,6 @@
+[tools]
+go = "1.25.3"
+watchexec = "2.3.2"
+
+[tasks.run-mok]
+run = "go run mok.go testdata/*.json https://jsonplaceholder.typicode.com/todos/"
