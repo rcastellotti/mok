@@ -83,7 +83,11 @@ func main() {
 	if flag.NArg() < 1 && len(directInput) == 0 {
 		errAndExit("no file specified")
 	}
-
+	// mok receives exactly what the shell passes.
+	//   ./mok testdata/*.json
+	// shells expand the glob before execution, so the program sees:
+	//   ./mok testdata/a.json testdata/b.json ...
+	// curious rabbits: https://man7.org/linux/man-pages/man7/glob.7.html
 	files := processFileArgs(flag.Args())
 
 	setupHandlers(directInput, files)
