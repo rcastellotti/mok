@@ -4,7 +4,7 @@
 
 ## why
 
-when building applications that consume JSON (especially frontends calling APIs), you often need to:
+when building applications that consume JSON (especially frontends calling APIs), you might want to:
 - avoid rate limiting during development
 - work offline or reduce network dependencies
 - iterate quickly without waiting for remote requests
