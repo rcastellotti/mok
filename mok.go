@@ -67,102 +67,41 @@ var (
 	verbosePtr = flag.Bool("v", false, "verbose output")
 )
 
+func errAndExit(msg string) {
+	fmt.Fprintf(os.Stderr, "error: %s\n\n", msg)
+	os.Exit(1)
+}
+
 func main() {
-	tmpl := template.Must(template.New("").Parse(indexTemplate))
-
-	file := os.Stdin
-	fi, err := file.Stat()
-	if err != nil {
-		errAndExit("cannot read direct input: " + err.Error())
-	}
-
-	size := fi.Size()
-	var directInputBytes = make([]byte, size)
-	if size > 0 {
-		if _, err := file.Read(directInputBytes); err != nil {
-			errAndExit("cannot read direct input: " + err.Error())
-		}
-	} else if *jsonStrPtr != "" {
-		directInputBytes = []byte(*jsonStrPtr)
-	}
-
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, usage)
 	}
 	flag.Parse()
 
-	if flag.NArg() < 1 && len(directInputBytes) == 0 {
+	directInput := getDirectInput()
+
+	if flag.NArg() < 1 && len(directInput) == 0 {
 		errAndExit("no file specified")
 	}
 
-	// mok receives exactly what the shell passes.
-	//   ./mok testdata/*.json
-	// shells expand the glob before execution, so the program sees:
-	//   ./mok testdata/a.json testdata/b.json ...
-	// curious rabbits: https://man7.org/linux/man-pages/man7/glob.7.html
-	args := flag.Args()
-	var argsSet = make(map[string]struct{}) // thanks rob, nice sets you got
-	var files []MokFile
+	files := processFileArgs(flag.Args())
 
-	for _, arg := range args {
-		var file string
-		var err error
-		if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") {
-			file, err = downloadJSON(arg)
-			if err != nil {
-				errAndExit("downloading remote file: " + err.Error())
-			}
-		} else {
-			if info, err := os.Stat(arg); err != nil {
-				errAndExit("checking file: " + err.Error())
-			} else if info.IsDir() {
-				errAndExit("argument is a directory")
-			}
-			file = arg
-		}
-		if _, ok := argsSet[file]; !ok {
-			argsSet[file] = struct{}{}
-			files = append(files, MokFile{FilePath: file, URLPath: "/" + filepath.Base(file)})
-		}
-	}
+	setupHandlers(directInput, files)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if len(directInputBytes) > 0 {
-			var dat map[string]any
-			if err := json.Unmarshal([]byte(directInputBytes), &dat); err != nil {
-				errAndExit("unmarshaling JSON: " + err.Error())
-			}
-			json.NewEncoder(w).Encode(dat)
-			return
-		}
-		if r.Header.Get("Accept") == "application/json" {
-			json.NewEncoder(w).Encode(files)
-			return
-		}
-		tmpl.Execute(w, files)
-	})
-
-	for _, f := range files {
-		_, fileName := filepath.Split(f.FilePath)
-		http.HandleFunc("/"+fileName, func(w http.ResponseWriter, r *http.Request) {
-			http.ServeFile(w, r, f.FilePath)
-		})
-	}
-
-	if len(directInputBytes) == 0 {
+	if len(directInput) == 0 {
 		printSummary(*portPtr, files)
 	} else {
-		fmt.Println("mok is serving direct input on http://localhost:" + strconv.Itoa(*portPtr) + "/")
+		fmt.Printf("mok is serving direct input on http://localhost:%d/\n", *portPtr)
 	}
 
 	if err := http.ListenAndServe(":"+strconv.Itoa(*portPtr), nil); err != nil {
-		errAndExit("http:" + err.Error())
+		errAndExit("http: " + err.Error())
 	}
 }
 
-func errAndExit(msg string) {
-	fmt.Fprintf(os.Stderr, "error: %s\n\n", msg)
-	os.Exit(1)
+type MokFile struct {
+	FilePath string
+	URLPath  string
 }
 
 func downloadJSON(_url string) (string, error) {
@@ -201,18 +140,12 @@ func downloadJSON(_url string) (string, error) {
 	return tempFile.Name(), nil
 }
 
-type MokFile struct {
-	FilePath string
-	URLPath  string
-}
-
 func printSummary(port int, files []MokFile) {
 	baseURL := fmt.Sprintf("http://localhost:%d", port)
 
 	fmt.Printf("  mok is listening at %s\n\n", baseURL)
 	fmt.Println("  available endpoints:")
 
-	// Find the longest URL path for alignment
 	maxURLLen := 0
 	for _, file := range files {
 		urlLen := len("GET " + file.URLPath)
@@ -221,12 +154,10 @@ func printSummary(port int, files []MokFile) {
 		}
 	}
 
-	// Print each endpoint with proper alignment
 	for _, file := range files {
 		url := file.URLPath
 		source := fmt.Sprintf("(%s)", file.FilePath)
 
-		// Calculate padding
 		padding := maxURLLen - len(" "+url)
 		spaces := strings.Repeat(" ", padding)
 
@@ -238,4 +169,108 @@ func logInfo(msg string) {
 	if *verbosePtr {
 		log.Println(msg)
 	}
+}
+
+func getDirectInput() []byte {
+	// stdin first
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		errAndExit("cannot read direct input: " + err.Error())
+	}
+
+	if size := fi.Size(); size > 0 {
+		directInput := make([]byte, size)
+		if _, err := os.Stdin.Read(directInput); err != nil {
+			errAndExit("cannot read direct input: " + err.Error())
+		}
+		return directInput
+	}
+
+	// then `-s` flag
+	if *jsonStrPtr != "" {
+		return []byte(*jsonStrPtr)
+	}
+
+	return nil
+}
+
+func processFileArgs(args []string) []MokFile {
+	seen := make(map[string]struct{})
+	var files []MokFile
+
+	for _, arg := range args {
+		filePath, err := resolveFile(arg)
+		if err != nil {
+			errAndExit(err.Error())
+		}
+
+		if _, exists := seen[filePath]; exists {
+			continue
+		}
+
+		seen[filePath] = struct{}{}
+		files = append(files, MokFile{
+			FilePath: filePath,
+			URLPath:  "/" + filepath.Base(filePath),
+		})
+	}
+
+	return files
+}
+
+func resolveFile(arg string) (string, error) {
+	// remote
+	if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") {
+		file, err := downloadJSON(arg)
+		if err != nil {
+			return "", fmt.Errorf("downloading remote file: %w", err)
+		}
+		return file, nil
+	}
+
+	// local
+	info, err := os.Stat(arg)
+	if err != nil {
+		return "", fmt.Errorf("checking file: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("argument is a directory: %s", arg)
+	}
+
+	return arg, nil
+}
+
+func setupHandlers(directInput []byte, files []MokFile) {
+	tmpl := template.Must(template.New("").Parse(indexTemplate))
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if len(directInput) > 0 {
+			serveDirectInput(w, directInput)
+			return
+		}
+
+		if r.Header.Get("Accept") == "application/json" {
+			json.NewEncoder(w).Encode(files)
+			return
+		}
+
+		tmpl.Execute(w, files)
+	})
+
+	for _, f := range files {
+		_, fileName := filepath.Split(f.FilePath)
+
+		http.HandleFunc("/"+fileName, func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, f.FilePath)
+		})
+	}
+}
+
+func serveDirectInput(w http.ResponseWriter, input []byte) {
+	var dat map[string]any
+	if err := json.Unmarshal(input, &dat); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(dat)
 }
